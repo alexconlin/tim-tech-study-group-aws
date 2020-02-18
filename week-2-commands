@@ -1,0 +1,25 @@
+aws --profile tsg ec2 create-vpc --cidr-block 10.10.0.0/16
+aws --profile tsg ec2 create-subnet --vpc-id vpc-0f35dcd5da4c02ba6 --cidr-block 10.10.0.0/24 --availability-zone eu-west-1a
+aws --profile tsg ec2 create-subnet --vpc-id vpc-0f35dcd5da4c02ba6 --cidr-block 10.10.1.0/24 --availability-zone eu-west-1b
+aws --profile tsg ec2 modify-subnet-attribute --subnet-id subnet-0c05bade588b83f26 --map-public-ip-on-launch
+aws --profile tsg ec2 modify-subnet-attribute --subnet-id subnet-0319643bbafaa8021 --map-public-ip-on-launch
+aws --profile tsg ec2 create-internet-gateway
+aws --profile tsg ec2 attach-internet-gateway --internet-gateway-id igw-05acb66000640f221 --vpc-id vpc-0f35dcd5da4c02ba6
+aws --profile tsg ec2 create-route-table --vpc-id vpc-0f35dcd5da4c02ba6
+aws --profile tsg ec2 associate-route-table --route-table-id rtb-055bf834ce291870f --subnet-id subnet-0c05bade588b83f26
+aws --profile tsg ec2 associate-route-table --route-table-id rtb-055bf834ce291870f --subnet-id subnet-0319643bbafaa8021
+aws --profile tsg ec2 create-route --route-table-id rtb-055bf834ce291870f --destination-cidr-block 0.0.0.0/0 --gateway-id igw-05acb66000640f221
+
+aws --profile tsg ec2 describe-images --owners amazon --filters "Name=name,Values=amzn2-ami-hvm-2.0.*-x86_64-gp2" "Name=virtualization-type,Values=hvm" --query 'reverse(sort_by(Images, &CreationDate))[1].ImageId'
+aws --profile tsg ec2 describe-instance-types --query 'InstanceTypes[?FreeTierEligible].InstanceType'
+
+aws --profile tsg ec2 create-security-group --vpc-id vpc-0f35dcd5da4c02ba6 --description 'public http' --group-name 'public-http'
+aws --profile tsg ec2 authorize-security-group-ingress --group-id sg-00d4f780e70ee67d3 --protocol tcp --port 80 --cidr 0.0.0.0/0 
+aws --profile tsg ec2 authorize-security-group-ingress --group-id sg-00d4f780e70ee67d3 --protocol tcp --port 22 --cidr "$(curl curlmyip.org)/32"
+aws --profile tsg elbv2 create-load-balancer --name myalb --subnets "subnet-0c05bade588b83f26" "subnet-0319643bbafaa8021" --security-groups sg-00d4f780e70ee67d3
+aws --profile tsg elbv2 create-target-group --name ec2-targets --protocol HTTP --port 80 --vpc-id vpc-0f35dcd5da4c02ba6
+aws --profile tsg elbv2 create-listener --load-balancer-arn arn:aws:elasticloadbalancing:eu-west-1:903720196572:loadbalancer/app/myalb/3c0147e0760e7486 --protocol HTTP --port 80 --default-actions Type=forward,TargetGroupArn=arn:aws:elasticloadbalancing:eu-west-1:903720196572:targetgroup/ec2-targets/959d024e24a6d6d8
+aws --profile tsg ec2 run-instances --subnet-id subnet-0c05bade588b83f26 --image-id ami-0713f98de93617bb4 --instance-type t2.micro --security-group-id sg-00d4f780e70ee67d3 --user-data '#!/bin/bash\nmkdir -p /var/www\necho "<html><body><h1>Hello Tech Study Group</h1>Are you having fun yet?<h2><div><img src="http://share.conlinoakley.com/7666z8ahw8v.png"></div>This hilarious message served by EC2 instance @ ${HOSTNAME} in an availability zone of $(ec2-metadata -z)</h2></body></html>" > /var/www/index.html\ncd /var/www\npython -m SimpleHTTPServer'
+aws --profile tsg elbv2 register-targets --target-group-arn arn:aws:elasticloadbalancing:eu-west-1:903720196572:targetgroup/ec2-targets/959d024e24a6d6d8 --targets Id=i-0a08ef7bfadeb9c9e,Port=8000
+aws --profile tsg ec2 run-instances --subnet-id subnet-0319643bbafaa8021 --image-id ami-0713f98de93617bb4 --instance-type t2.micro --security-group-id sg-00d4f780e70ee67d3 --user-data '#!/bin/bash\nmkdir -p /var/www\necho "<html><body><h1>Hello Tech Study Group</h1>Are you having fun yet?<h2><div><img src="http://share.conlinoakley.com/7666z8ahw8v.png"></div>This hilarious message served by EC2 instance @ ${HOSTNAME} in an availability zone of $(ec2-metadata -z)</h2></body></html>" > /var/www/index.html\ncd /var/www\npython -m SimpleHTTPServer'
+aws --profile tsg elbv2 register-targets --target-group-arn arn:aws:elasticloadbalancing:eu-west-1:903720196572:targetgroup/ec2-targets/959d024e24a6d6d8 --targets Id=i-0b1b41dcd993faf16,Port=8000
