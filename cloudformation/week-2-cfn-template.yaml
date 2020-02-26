@@ -7,6 +7,25 @@ Parameters:
   TestWebPageUserData:
     Type: String
     Default: |
+      Content-Type: multipart/mixed; boundary="//"
+      MIME-Version: 1.0
+
+      --//
+      Content-Type: text/cloud-config; charset="us-ascii"
+      MIME-Version: 1.0
+      Content-Transfer-Encoding: 7bit
+      Content-Disposition: attachment; filename="cloud-config.txt"
+
+      #cloud-config
+      cloud_final_modules:
+      - [scripts-user, always]
+
+      --//
+      Content-Type: text/x-shellscript; charset="us-ascii"
+      MIME-Version: 1.0
+      Content-Transfer-Encoding: 7bit
+      Content-Disposition: attachment; filename="userdata.txt"
+
       #!/bin/bash
       mkdir -p /var/www
       echo '<html><body><h1>Hello Tech Study Group</h1>' > /var/www/index.html
@@ -14,6 +33,7 @@ Parameters:
       echo 'This hilarious message served by EC2 instance @ ${HOSTNAME} in an availability zone of $(ec2-metadata -z)</h2></body></html>' >> /var/www/index.html
       cd /var/www
       python -m SimpleHTTPServer
+      --//
 Resources:
   Vpc:
     Type: 'AWS::EC2::VPC'
