@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'CloudFormation Stack to deploy a loadbalanced web service writing to DynamoDB on 2 EC2 instances in a VPC'
+Parameters:
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  TestWebPageUserData:
+    Type: String
+    Default: |
+      Content-Type: multipart/mixed; boundary="//"
+      MIME-Version: 1.0
+
+      --//
+      Content-Type: text/cloud-config; charset="us-ascii"
+      MIME-Version: 1.0
+      Content-Transfer-Encoding: 7bit
+      Content-Disposition: attachment; filename="cloud-config.txt"
+
+      #cloud-config
+      cloud_final_modules:
+      - [scripts-user, always]
+
+      --//
+      Content-Type: text/html; charset="us-ascii"
+      MIME-Version: 1.0
+      Content-Transfer-Encoding: 7bit
+      Content-Disposition: attachment; filename="userdata.txt"
+
+      #!/bin/bash
+      mkdir -p /var/www
+      echo '<html><body><h1>Hello Tech Study Group</h1>' > /var/www/index.html
+      echo '<h2>This hilarious message served by EC2 instance @ ${HOSTNAME} in an availability zone of $(ec2-metadata -z)</h2>' >> /var/www/index.html
+      echo '<script src="https://sdk.amazonaws.com/js/aws-sdk-2.631.0.min.js"></script></body></html>' >> /var/www/index.html
+      cd /var/www
+      python -m SimpleHTTPServer
+
+      --//
+      Content-Type: text/x-shellscript; charset="us-ascii"
+      MIME-Version: 1.0
+      Content-Transfer-Encoding: 7bit
+      Content-Disposition: attachment; filename="userdata.txt"
+
+      #!/bin/bash
+      mkdir -p /var/www
+      echo '<html><body><h1>Hello Tech Study Group</h1>' > /var/www/index.html
+      echo 'Are you having fun yet?<h2><div><img src="http://share.conlinoakley.com/7666z8ahw8v.png"></div>' >> /var/www/index.html
+      echo 'This hilarious message served by EC2 instance @ ${HOSTNAME} in an availability zone of $(ec2-metadata -z)</h2></body></html>' >> /var/www/index.html
+      cd /var/www
+      python -m SimpleHTTPServer
+      --//
+Resources:
+  Vpc:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.10.0.0/16
+  PublicSubnetA:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.10.0.0/24
+      AvailabilityZone: eu-west-1a
+      MapPublicIpOnLaunch: true
+  PublicSubnetB:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.10.1.0/24
+      AvailabilityZone: eu-west-1b
+      MapPublicIpOnLaunch: true
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties: {}
+  VpcGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  RouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref Vpc
+  Route:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref RouteTable
+      GatewayId: !Ref InternetGateway
+      DestinationCidrBlock: 0.0.0.0/0
+  SubnetRouteTableAssociationA:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PublicSubnetA
+  SubnetRouteTableAssociationB:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PublicSubnetB
+  PublicSshSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref Vpc
+      GroupName: public-ssh
+      GroupDescription: ssh public access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+  PublicHttpSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref Vpc
+      GroupName: public-http
+      GroupDescription: http public access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+  LoadBalancerWebServersSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref Vpc
+      GroupName: load-balancer-and-web-servers
+      GroupDescription: access to webservers from loadbalancer
+  LoadBalancerWebServersSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      FromPort: 80
+      GroupId: !Ref LoadBalancerWebServersSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref LoadBalancerWebServersSecurityGroup
+      ToPort: 8000
+  LoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Name: myalb
+      SubnetMappings:
+        - SubnetId: !Ref PublicSubnetA
+        - SubnetId: !Ref PublicSubnetB
+      SecurityGroups:
+        - !Ref PublicHttpSecurityGroup
+        - !Ref LoadBalancerWebServersSecurityGroup
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: 
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref LoadBalancerTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+  Ec2InstanceA:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t2.micro
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds:
+        - !Ref PublicSshSecurityGroup
+        - !Ref LoadBalancerWebServersSecurityGroup
+      UserData:
+        "Fn::Base64": !Ref TestWebPageUserData
+  Ec2InstanceB:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t2.micro
+      SubnetId: !Ref PublicSubnetB
+      SecurityGroupIds:
+        - !Ref PublicSshSecurityGroup
+        - !Ref LoadBalancerWebServersSecurityGroup
+      UserData:
+        "Fn::Base64": !Ref TestWebPageUserData
+  LoadBalancerTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      VpcId: !Ref Vpc
+      Name: ec2-targets
+      Protocol: HTTP
+      Port: 8000
+      TargetType: instance
+      Targets:
+        - Id: !Ref Ec2InstanceA
+        - Id: !Ref Ec2InstanceB
