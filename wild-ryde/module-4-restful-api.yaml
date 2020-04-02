@@ -92,5 +92,6 @@ Resources:
           !Sub "${UserManagementStackName}-CognitoUserPollArn"
 
 Outputs:
-  ProdEndpoint:
+  Export:
+    Name: !Join [ "-", [ !Ref "AWS::StackName", ProdEndpoint ] ]
     Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
