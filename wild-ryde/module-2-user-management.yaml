@@ -162,3 +162,7 @@ Resources:
 
 
     Type: AWS::Lambda::Function
+
+Outputs:
+  CognitoUserPollArn:
+    Value: !GetAtt UserPool.Arn
