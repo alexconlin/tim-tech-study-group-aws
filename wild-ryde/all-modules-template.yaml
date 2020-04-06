@@ -1,0 +1,627 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description:
+  Creates a static website using S3 for the Wild Rydes serverless web application workshop
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: The name for the bucket hosting your website, e.g. 'wildrydes-yourname'
+
+  CodeBucket:
+    Type: String
+    Default: wildrydes-eu-west-1
+    Description: S3 bucket containing the code deployed by this template
+
+  CodeKeyPrefix:
+    Type: String
+    Default: WebApplication/1_StaticWebHosting
+    Description: Key prefix for resources referenced from the CodeBucket
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Website Configuration"
+        Parameters:
+          - BucketName
+      -
+        Label:
+          default: "Advanced Configuration"
+        Parameters:
+          - CodeBucket
+          - CodeKeyPrefix
+    ParameterLabels:
+      BucketName:
+        default: "Website Bucket Name"
+
+Resources:
+  WebsiteBucket:
+    Properties:
+      BucketName: !Ref BucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+    Type: "AWS::S3::Bucket"
+
+  WebsiteBucketPolicy:
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${WebsiteBucket}/*"
+    Type: "AWS::S3::BucketPolicy"
+
+  WebsiteContent:
+    Properties:
+      ServiceToken: !GetAtt CopyS3ObjectsFunction.Arn
+      SourceBucket: !Ref CodeBucket
+      SourcePrefix: !Sub "${CodeKeyPrefix}/website/"
+      Bucket: !Ref WebsiteBucket
+    Type: "Custom::S3Objects"
+
+  S3CopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+
+      Path: /wildrydes/
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        -
+          PolicyName: S3Access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Sid: AllowLogging
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+              -
+                Sid: SourceBucketReadAccess
+                Effect: Allow
+                Action:
+                  - "s3:ListBucket"
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${CodeBucket}"
+                  - !Sub "arn:aws:s3:::${CodeBucket}/${CodeKeyPrefix}/*"
+              -
+                Sid: DestBucketWriteAccess
+                Effect: Allow
+                Action:
+                  - "s3:ListBucket"
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                  - "s3:PutObjectVersionAcl"
+                  - "s3:DeleteObject"
+                  - "s3:DeleteObjectVersion"
+                  - "s3:CopyObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${WebsiteBucket}"
+                  - !Sub "arn:aws:s3:::${WebsiteBucket}/*"
+
+  CopyS3ObjectsFunction:
+    Properties:
+      Description: Copies objects from a source S3 bucket to a destination
+      Handler: index.handler
+      Runtime: python2.7
+      Role: !GetAtt S3CopyRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import cfnresponse
+
+          import boto3
+          from botocore.exceptions import ClientError
+          client = boto3.client('s3')
+
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+            logger.info("Received event: %s" % json.dumps(event))
+            source_bucket = event['ResourceProperties']['SourceBucket']
+            source_prefix = event['ResourceProperties'].get('SourcePrefix') or ''
+            bucket = event['ResourceProperties']['Bucket']
+            prefix = event['ResourceProperties'].get('Prefix') or ''
+
+            result = cfnresponse.SUCCESS
+
+            try:
+              if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                result = copy_objects(source_bucket, source_prefix, bucket, prefix)
+              elif event['RequestType'] == 'Delete':
+                result = delete_objects(bucket, prefix)
+            except ClientError as e:
+              logger.error('Error: %s', e)
+              result = cfnresponse.FAILED
+
+            cfnresponse.send(event, context, result, {})
+
+
+          def copy_objects(source_bucket, source_prefix, bucket, prefix):
+            paginator = client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(Bucket=source_bucket, Prefix=source_prefix)
+            for key in {x['Key'] for page in page_iterator for x in page['Contents']}:
+              dest_key = os.path.join(prefix, os.path.relpath(key, source_prefix))
+              if not key.endswith('/'):
+                print 'copy {} to {}'.format(key, dest_key)
+                client.copy_object(CopySource={'Bucket': source_bucket, 'Key': key}, Bucket=bucket, Key = dest_key)
+            return cfnresponse.SUCCESS
+
+          def delete_objects(bucket, prefix):
+            paginator = client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(Bucket=bucket, Prefix=prefix)
+            objects = [{'Key': x['Key']} for page in page_iterator for x in page['Contents']]
+            client.delete_objects(Bucket=bucket, Delete={'Objects': objects})
+            return cfnresponse.SUCCESS
+
+
+    Type: AWS::Lambda::Function
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: WildRydes
+      AliasAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: WildRydesWeb
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+
+  UpdateConfig:
+    Properties:
+      ServiceToken: !GetAtt UpdateConfigFunction.Arn
+      UserPool: !Ref UserPool
+      Client: !Ref UserPoolClient
+      Region: !Ref "AWS::Region"
+      Bucket: !Ref WebsiteBucket
+      InvokeUrl: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+    Type: "Custom::ConfigFile"
+    DependsOn: WebsiteContent
+
+  CognitoConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+
+      Path: /wildrydes/
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        -
+          PolicyName: CognitoConfig
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Sid: Logging
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+              -
+                Sid: Cognito
+                Effect: Allow
+                Action:
+                  - "cognito-idp:CreateUserPool"
+                  - "cognito-idp:DeleteUserPool"
+                  - "cognito-idp:CreateUserPoolClient"
+                  - "cognito-idp:DeleteUserPoolClient"
+                Resource: "*"
+              -
+                Sid: ConfigBucketWriteAccess
+                Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                  - "s3:PutObjectVersionAcl"
+                Resource:
+                  - !Sub "arn:aws:s3:::${WebsiteBucket}/*"
+
+  UpdateConfigFunction:
+    Properties:
+      Description: Copies objects from a source S3 bucket to a destination
+      Handler: index.handler
+      Runtime: python2.7
+      Role: !GetAtt CognitoConfigRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          s3 = boto3.resource('s3')
+
+          def create(properties, physical_id):
+            userPoolId = properties['UserPool']
+            clientId = properties['Client']
+            region = properties['Region']
+            bucket = properties['Bucket']
+            invokeUrl = properties['InvokeUrl']
+
+            object = s3.Object(bucket, 'js/config.js')
+            config_content = """
+          var _config = {
+              cognito: {
+                  userPoolId: '%s', // e.g. us-east-2_uXboG5pAb
+                  userPoolClientId: '%s', // e.g. 25ddkmj4v6hfsfvruhpfi7n4hv
+                  region: '%s', // e.g. us-east-2
+              },
+              api: {
+                  invokeUrl: '%s', // e.g. https://rc7nyt4tql.execute-api.us-west-2.amazonaws.com/prod'
+              }
+          };
+              """
+            config_content = config_content % (userPoolId, clientId, region, invokeUrl)
+            config = s3.Object(bucket,'js/config.js')
+            config.put(Body=config_content)
+            return cfnresponse.SUCCESS, None
+
+          def update(properties, physical_id):
+            return create(properties, physical_id)
+
+          def delete(properties, physical_id):
+            return cfnresponse.SUCCESS, physical_id
+
+          def handler(event, context):
+            print "Received event: %s" % json.dumps(event)
+
+            status = cfnresponse.FAILED
+            new_physical_id = None
+
+            try:
+              properties = event.get('ResourceProperties')
+              physical_id = event.get('PhysicalResourceId')
+
+              status, new_physical_id = {
+                'Create': create,
+                'Update': update,
+                'Delete': delete
+              }.get(event['RequestType'], lambda x, y: (cfnresponse.FAILED, None))(properties, physical_id)
+            except Exception as e:
+              print "Exception: %s" % e
+              status = cfnresponse.FAILED
+            finally:
+              cfnresponse.send(event, context, status, {}, new_physical_id)
+
+
+    Type: AWS::Lambda::Function
+
+  RidesDynamoDBTable: 
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions: 
+      - AttributeName: "RideId"
+        AttributeType: "S"
+      KeySchema: 
+      - AttributeName: "RideId"
+        KeyType: "HASH"
+      ProvisionedThroughput: 
+        ReadCapacityUnits: "1"
+        WriteCapacityUnits: "1"
+      TableName: "Rides"
+
+  RequestUnicornLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: DynamoDBWriteAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+            - dynamodb:PutItem
+            Resource: 'arn:aws:dynamodb:eu-west-1:903720196572:table/Rides'
+          - Effect: Allow
+            Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+            Resource: '*'
+
+  RequestUnicornLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: RequestUnicorn
+      Runtime: nodejs12.x
+      Role: !GetAtt RequestUnicornLambdaExecutionRole.Arn
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          const randomBytes = require('crypto').randomBytes;
+
+          const AWS = require('aws-sdk');
+
+          const ddb = new AWS.DynamoDB.DocumentClient();
+
+          const fleet = [
+              {
+                  Name: 'Bucephalus',
+                  Color: 'Golden',
+                  Gender: 'Male',
+              },
+              {
+                  Name: 'Shadowfax',
+                  Color: 'White',
+                  Gender: 'Male',
+              },
+              {
+                  Name: 'Rocinante',
+                  Color: 'Yellow',
+                  Gender: 'Female',
+              },
+          ];
+
+          exports.handler = (event, context, callback) => {
+              if (!event.requestContext.authorizer) {
+                errorResponse('Authorization not configured', context.awsRequestId, callback);
+                return;
+              }
+
+              const rideId = toUrlString(randomBytes(16));
+              console.log('Received event (', rideId, '): ', event);
+
+              // Because we're using a Cognito User Pools authorizer, all of the claims
+              // included in the authentication token are provided in the request context.
+              // This includes the username as well as other attributes.
+              const username = event.requestContext.authorizer.claims['cognito:username'];
+
+              // The body field of the event in a proxy integration is a raw string.
+              // In order to extract meaningful values, we need to first parse this string
+              // into an object. A more robust implementation might inspect the Content-Type
+              // header first and use a different parsing strategy based on that value.
+              const requestBody = JSON.parse(event.body);
+
+              const pickupLocation = requestBody.PickupLocation;
+
+              const unicorn = findUnicorn(pickupLocation);
+
+              recordRide(rideId, username, unicorn).then(() => {
+                  // You can use the callback function to provide a return value from your Node.js
+                  // Lambda functions. The first parameter is used for failed invocations. The
+                  // second parameter specifies the result data of the invocation.
+
+                  // Because this Lambda function is called by an API Gateway proxy integration
+                  // the result object must use the following structure.
+                  callback(null, {
+                      statusCode: 201,
+                      body: JSON.stringify({
+                          RideId: rideId,
+                          Unicorn: unicorn,
+                          UnicornName: unicorn.Name,
+                          Eta: '30 seconds',
+                          Rider: username,
+                      }),
+                      headers: {
+                          'Access-Control-Allow-Origin': '*',
+                      },
+                  });
+              }).catch((err) => {
+                  console.error(err);
+
+                  // If there is an error during processing, catch it and return
+                  // from the Lambda function successfully. Specify a 500 HTTP status
+                  // code and provide an error message in the body. This will provide a
+                  // more meaningful error response to the end client.
+                  errorResponse(err.message, context.awsRequestId, callback)
+              });
+          };
+          
+          // This is where you would implement logic to find the optimal unicorn for
+          // this ride (possibly invoking another Lambda function as a microservice.)
+          // For simplicity, we'll just pick a unicorn at random.
+          function findUnicorn(pickupLocation) {
+              console.log('Finding unicorn for ', pickupLocation.Latitude, ', ', pickupLocation.Longitude);
+              return fleet[Math.floor(Math.random() * fleet.length)];
+          }
+
+          function recordRide(rideId, username, unicorn) {
+              return ddb.put({
+                  TableName: 'Rides',
+                  Item: {
+                      RideId: rideId,
+                      User: username,
+                      Unicorn: unicorn,
+                      UnicornName: unicorn.Name,
+                      RequestTime: new Date().toISOString(),
+                  },
+              }).promise();
+          }
+
+          function toUrlString(buffer) {
+              return buffer.toString('base64')
+                  .replace(/\+/g, '-')
+                  .replace(/\//g, '_')
+                  .replace(/=/g, '');
+          }
+
+          function errorResponse(errorMessage, awsRequestId, callback) {
+            callback(null, {
+              statusCode: 500,
+              body: JSON.stringify({
+                Error: errorMessage,
+                Reference: awsRequestId,
+              }),
+              headers: {
+                'Access-Control-Allow-Origin': '*',
+              },
+            });
+          }
+      Description: RequestUnicorn
+      TracingConfig:
+        Mode: Active
+
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties: 
+      Name: WildRydes
+      EndpointConfiguration: 
+        Types:
+        - EDGE
+
+  RideApiResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt 
+      - RestApi
+      - RootResourceId
+      PathPart: ride
+
+  OptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref RideApiResource
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        Type: MOCK
+      MethodResponses:
+      - StatusCode: 200
+        ResponseModels:
+          application/json: 'Empty'
+        ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  PostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties: 
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref Authorizer
+      Integration: 
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RequestUnicornLambdaFunction.Arn}/invocations"
+        PassthroughBehavior: WHEN_NO_MATCH
+        ContentHandling: CONVERT_TO_TEXT
+        TimeoutInMillis: 29000
+        IntegrationResponses: 
+        - StatusCode: '200' 
+          ResponseTemplates:
+            application/json: 'Empty'
+      MethodResponses: 
+      - StatusCode: '200' 
+        ResponseModels:
+          application/json: 'Empty'
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref RideApiResource
+
+  Deployment:
+    DependsOn:
+    - OptionsMethod
+    - PostMethod
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref RestApi
+      StageName: prod
+
+  Authorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      RestApiId: !Ref RestApi
+      Name: WildRydes
+      Type: COGNITO_USER_POOLS
+      AuthType: cognito_user_pools
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+      - !GetAtt UserPool.Arn
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt RequestUnicornLambdaFunction.Arn
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/*"
+
+  ApiGatewayLogsRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+        - Effect: "Allow"
+          Principal: 
+            Service: 
+            - "apigateway.amazonaws.com"
+          Action: 
+          - "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+      Path: "/"
+      RoleName: "ApiGatewayLogs"
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties: 
+      CloudWatchRoleArn: !GetAtt ApiGatewayLogsRole.Arn
+    DependsOn: RestApi
+
+Outputs:
+  WebsiteURL:
+    Value: !GetAtt WebsiteBucket.WebsiteURL
