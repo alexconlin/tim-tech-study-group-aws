@@ -5,6 +5,10 @@ Description:
   Creates a static website using S3 for the Wild Rydes serverless web application workshop
 
 Parameters:
+  AwsAccountId:
+    Type: String
+    Description: The AWS account ID for the account hosting your website, e.g. '903720196572'
+
   BucketName:
     Type: String
     Description: The name for the bucket hosting your website, e.g. 'wildrydes-yourname'
@@ -26,6 +30,7 @@ Metadata:
         Label:
           default: "Website Configuration"
         Parameters:
+          - AwsAccountId
           - BucketName
       -
         Label:
@@ -34,6 +39,8 @@ Metadata:
           - CodeBucket
           - CodeKeyPrefix
     ParameterLabels:
+      AwsAccountId:
+        default: "AWS Account ID"
       BucketName:
         default: "Website Bucket Name"
 
@@ -362,7 +369,7 @@ Resources:
           - Effect: Allow
             Action:
             - dynamodb:PutItem
-            Resource: 'arn:aws:dynamodb:eu-west-1:903720196572:table/Rides'
+            Resource: !Sub "arn:aws:dynamodb:eu-west-1:${AwsAccountId}:table/Rides"
           - Effect: Allow
             Action:
             - xray:PutTraceSegments

@@ -1,6 +1,6 @@
 To create the stack: 
 ```bash
-make create bucket=wildrydes-<YOURNAME>
+make create account=<AWS_ACCOUNT_ID> bucket=wildrydes-<YOURNAME>
 ```
 
 To delete the stack: 
